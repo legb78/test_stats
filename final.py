@@ -35,22 +35,43 @@ from typing import Dict, List, Tuple
 import requests
 import numpy as np
 import pandas as pd
-import seaborn as sns
 import matplotlib.pyplot as plt
-from scipy.stats import (
-	ttest_ind,
-	pearsonr,
-	chi2_contingency,
-	kruskal,
-	f_oneway,
-)
+
+# Tentative d'import de seaborn (optionnel pour déploiement allégé)
+try:  # pragma: no cover - garde-fou environnement
+	import seaborn as sns  # type: ignore
+	HAS_SEABORN = True
+except Exception:  # noqa: BLE001
+	HAS_SEABORN = False
+
+# Import SciPy (fortement recommandé). Si absent on désactive les tests.
+try:  # pragma: no cover
+	from scipy.stats import (  # type: ignore
+		ttest_ind,
+		pearsonr,
+		chi2_contingency,
+		kruskal,
+		f_oneway,
+	)
+	HAS_SCIPY = True
+except Exception:  # noqa: BLE001
+	HAS_SCIPY = False
+	# Définitions minimales pour éviter les plantages si SciPy manque
+	def _scipy_missing(*_, **__):
+		raise ImportError("SciPy n'est pas installé : installez 'scipy' pour activer les tests statistiques.")
+
+	ttest_ind = pearsonr = chi2_contingency = kruskal = f_oneway = _scipy_missing  # type: ignore
 import streamlit as st
 
 # ---------------------------------------------------------------------------
 # Configuration Streamlit & Style
 # ---------------------------------------------------------------------------
 st.set_page_config(page_title="Dashboard Statistique", layout="wide")
-sns.set_theme(style="whitegrid")
+if 'sns' in globals() and HAS_SEABORN:
+	try:
+		sns.set_theme(style="whitegrid")
+	except Exception:
+		pass
 CUSTOM_CSS = """
 <style>
 /* Global tweaks */
@@ -227,40 +248,79 @@ def run_anova(df: pd.DataFrame, group_col: str, value_col: str) -> Dict:
 # ---------------------------------------------------------------------------
 def make_boxplot(df: pd.DataFrame, x: str, y: str):
 	fig, ax = plt.subplots(figsize=(5, 3.5))
-	sns.boxplot(data=df, x=x, y=y, ax=ax)
-	sns.stripplot(data=df, x=x, y=y, ax=ax, color="black", size=3, alpha=0.5)
+	if HAS_SEABORN:
+		sns.boxplot(data=df, x=x, y=y, ax=ax)
+		sns.stripplot(data=df, x=x, y=y, ax=ax, color="black", size=3, alpha=0.5)
+	else:  # fallback matplotlib
+		cats = list(df[x].dropna().unique())
+		data = [df[df[x] == c][y].dropna().values for c in cats]
+		ax.boxplot(data, labels=cats, patch_artist=True)
+		for i, vals in enumerate(data, start=1):
+			if len(vals):
+				ax.scatter(np.random.normal(i, 0.04, len(vals)), vals, s=15, alpha=0.6, color='black')
 	ax.set_title(f"Distribution de {y} selon {x}")
 	return fig
 
 
 def make_scatter(df: pd.DataFrame, x: str, y: str):
 	fig, ax = plt.subplots(figsize=(5, 3.5))
-	sns.regplot(data=df, x=x, y=y, ax=ax, scatter_kws={"alpha": 0.7})
+	if HAS_SEABORN:
+		sns.regplot(data=df, x=x, y=y, ax=ax, scatter_kws={"alpha": 0.7})
+	else:
+		ax.scatter(df[x], df[y], alpha=0.7)
+		if df[x].notna().sum() > 1 and df[y].notna().sum() > 1:
+			try:
+				a, b = np.polyfit(df[x].dropna(), df[y].dropna(), 1)
+				xs = np.linspace(df[x].min(), df[x].max(), 100)
+				ax.plot(xs, a*xs + b, color='red')
+			except Exception:
+				pass
 	ax.set_title(f"Relation {x} vs {y}")
 	return fig
 
 
 def make_heatmap(contingency: pd.DataFrame):
 	fig, ax = plt.subplots(figsize=(4 + 0.3 * contingency.shape[1], 3 + 0.3 * contingency.shape[0]))
-	sns.heatmap(contingency, annot=True, fmt="d", cmap="Blues", ax=ax)
+	if HAS_SEABORN:
+		sns.heatmap(contingency, annot=True, fmt="d", cmap="Blues", ax=ax)
+	else:
+		data = contingency.values
+		im = ax.imshow(data, cmap='Blues')
+		ax.set_xticks(range(data.shape[1]))
+		ax.set_yticks(range(data.shape[0]))
+		ax.set_xticklabels(contingency.columns)
+		ax.set_yticklabels(contingency.index)
+		for i in range(data.shape[0]):
+			for j in range(data.shape[1]):
+				ax.text(j, i, int(data[i, j]), ha='center', va='center', color='black')
+		fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
 	ax.set_title("Table de contingence")
 	return fig
 
 
 def make_distplot(df: pd.DataFrame, col: str):
 	fig, ax = plt.subplots(figsize=(5, 3))
-	sns.histplot(df[col].dropna(), kde=True, ax=ax)
+	series = df[col].dropna()
+	if HAS_SEABORN:
+		sns.histplot(series, kde=True, ax=ax)
+	else:
+		ax.hist(series, bins='auto', alpha=0.75, color='#2563eb')
 	ax.set_title(f"Distribution de {col}")
 	return fig
 
 def make_regression(df: pd.DataFrame, x: str, y: str):
 	"""Scatter + droite de régression (OLS simple)."""
 	fig, ax = plt.subplots(figsize=(6,4))
-	sns.scatterplot(data=df, x=x, y=y, ax=ax, alpha=0.6, edgecolor=None)
+	if HAS_SEABORN:
+		try:
+			sns.scatterplot(data=df, x=x, y=y, ax=ax, alpha=0.6, edgecolor=None)
+		except Exception:
+			ax.scatter(df[x], df[y], alpha=0.6)
+	else:
+		ax.scatter(df[x], df[y], alpha=0.6)
 	if df[x].notna().sum() > 1 and df[y].notna().sum() > 1:
 		try:
-			coef = np.polyfit(df[x].dropna(), df[y].dropna(), 1)
-			a, b = coef
+			a, b = np.polyfit(df[x].dropna(), df[y].dropna(), 1)
 			x_line = np.linspace(df[x].min(), df[x].max(), 100)
 			y_line = a * x_line + b
 			ax.plot(x_line, y_line, color='red', label=f"y = {a:.3f}x + {b:.3f}")
@@ -327,6 +387,12 @@ with st.sidebar:
 # ---------------------------------------------------------------------------
 st.title("📊 Dashboard Statistique Interactif")
 st.markdown("Sélectionnez les variables pour lancer les tests. Changez la source si nécessaire.")
+
+# Avertissements dépendances manquantes
+if not HAS_SEABORN:
+	st.warning("Seaborn non installé - utilisation de graphes matplotlib simplifiés. Ajoutez 'seaborn' dans requirements.txt pour des visuels enrichis.")
+if not HAS_SCIPY:
+	st.error("SciPy non installé - les tests statistiques sont désactivés. Ajoutez 'scipy' dans requirements.txt.")
 
 # Chargement dynamique selon la source
 df = pd.DataFrame()
@@ -478,88 +544,103 @@ st.markdown("## 🔬 Tests principaux")
 tests_tab = st.tabs(["t Student", "Corrélation", "Khi2", "Kruskal", "ANOVA"])
 
 with tests_tab[0]:
-	if len(cat_vars) >= 1 and len(quant_vars) >= 1:
-		col1, col2 = st.columns(2)
-		with col1:
-			group = st.selectbox("Groupe (2 modalités)", cat_vars, key="t_group")
-		with col2:
-			val = st.selectbox("Variable quantitative", quant_vars, key="t_val")
-		res = run_ttest(df, group, val)
-		if res.get('ok'):
-			c1, c2, c3 = st.columns(3)
-			_metric_row((c1,c2,c3), [("t", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("Signif.", ("Oui" if res['pvalue']<alpha else "Non"))])
-			st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
-			st.pyplot(make_boxplot(df[df[group].isin(res['groups'])], group, val))
-		else:
-			st.warning(res.get('msg'))
+	if not HAS_SCIPY:
+		st.info("Tests indisponibles (SciPy manquant).")
 	else:
-		st.info("Ajouter / dériver une variable catégorielle pour ce test.")
+		if len(cat_vars) >= 1 and len(quant_vars) >= 1:
+			col1, col2 = st.columns(2)
+			with col1:
+				group = st.selectbox("Groupe (2 modalités)", cat_vars, key="t_group")
+			with col2:
+				val = st.selectbox("Variable quantitative", quant_vars, key="t_val")
+			res = run_ttest(df, group, val)
+			if res.get('ok'):
+				c1, c2, c3 = st.columns(3)
+				_metric_row((c1,c2,c3), [("t", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("Signif.", ("Oui" if res['pvalue']<alpha else "Non"))])
+				st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
+				st.pyplot(make_boxplot(df[df[group].isin(res['groups'])], group, val))
+			else:
+				st.warning(res.get('msg'))
+		else:
+			st.info("Ajouter / dériver une variable catégorielle pour ce test.")
 
 with tests_tab[1]:
-	if len(quant_vars) >= 2:
-		col1, col2 = st.columns(2)
-		with col1:
-			xv = st.selectbox("Quantitative 1", quant_vars, key="pear_x2")
-		with col2:
-			yv = st.selectbox("Quantitative 2", [q for q in quant_vars if q != xv], key="pear_y2")
-		res = run_pearson(df, xv, yv)
-		if res.get('ok'):
-			c1, c2, c3 = st.columns(3)
-			_metric_row((c1,c2,c3), [("r", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("n", res['n'])])
-			st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
-			st.pyplot(make_scatter(df, xv, yv))
-		else:
-			st.warning(res.get('msg'))
+	if not HAS_SCIPY:
+		st.info("Corrélation indisponible (SciPy manquant).")
 	else:
-		st.info("Au moins deux quantitatives nécessaires.")
+		if len(quant_vars) >= 2:
+			col1, col2 = st.columns(2)
+			with col1:
+				xv = st.selectbox("Quantitative 1", quant_vars, key="pear_x2")
+			with col2:
+				yv = st.selectbox("Quantitative 2", [q for q in quant_vars if q != xv], key="pear_y2")
+			res = run_pearson(df, xv, yv)
+			if res.get('ok'):
+				c1, c2, c3 = st.columns(3)
+				_metric_row((c1,c2,c3), [("r", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("n", res['n'])])
+				st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
+				st.pyplot(make_scatter(df, xv, yv))
+			else:
+				st.warning(res.get('msg'))
+		else:
+			st.info("Au moins deux quantitatives nécessaires.")
 
 with tests_tab[2]:
-	if len(cat_vars) >= 2:
-		col1, col2 = st.columns(2)
-		with col1:
-			c1v = st.selectbox("Qualitative 1", cat_vars, key="chi1")
-		with col2:
-			c2v = st.selectbox("Qualitative 2", [c for c in cat_vars if c != c1v], key="chi2")
-		res = run_chi2(df, c1v, c2v)
-		if res.get('ok'):
-			c1c, c2c, c3c = st.columns(3)
-			_metric_row((c1c,c2c,c3c), [("Chi2", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("ddl", res['dof'])])
-			st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
-			st.pyplot(make_heatmap(res['contingency']))
-		else:
-			st.warning(res.get('msg'))
+	if not HAS_SCIPY:
+		st.info("Test Khi2 indisponible (SciPy manquant).")
 	else:
-		st.info("Deux qualitatives nécessaires.")
+		if len(cat_vars) >= 2:
+			col1, col2 = st.columns(2)
+			with col1:
+				c1v = st.selectbox("Qualitative 1", cat_vars, key="chi1")
+			with col2:
+				c2v = st.selectbox("Qualitative 2", [c for c in cat_vars if c != c1v], key="chi2")
+			res = run_chi2(df, c1v, c2v)
+			if res.get('ok'):
+				c1c, c2c, c3c = st.columns(3)
+				_metric_row((c1c,c2c,c3c), [("Chi2", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("ddl", res['dof'])])
+				st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
+				st.pyplot(make_heatmap(res['contingency']))
+			else:
+				st.warning(res.get('msg'))
+		else:
+			st.info("Deux qualitatives nécessaires.")
 
 with tests_tab[3]:
-	if len(cat_vars) >= 1 and len(quant_vars) >= 1:
-		group = st.selectbox("Groupe", cat_vars, key="kw_group2")
-		val = st.selectbox("Quantitative", quant_vars, key="kw_val2")
-		res = run_kruskal(df, group, val)
-		if res.get('ok'):
-			c1k,c2k,c3k = st.columns(3)
-			_metric_row((c1k,c2k,c3k), [("H", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("k", res['k'])])
-			st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
-			st.pyplot(make_boxplot(df, group, val))
-		else:
-			st.warning(res.get('msg'))
+	if not HAS_SCIPY:
+		st.info("Kruskal indisponible (SciPy manquant).")
 	else:
-		st.info("Variables insuffisantes.")
+		if len(cat_vars) >= 1 and len(quant_vars) >= 1:
+			group = st.selectbox("Groupe", cat_vars, key="kw_group2")
+			val = st.selectbox("Quantitative", quant_vars, key="kw_val2")
+			res = run_kruskal(df, group, val)
+			if res.get('ok'):
+				c1k,c2k,c3k = st.columns(3)
+				_metric_row((c1k,c2k,c3k), [("H", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("k", res['k'])])
+				st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
+				st.pyplot(make_boxplot(df, group, val))
+			else:
+				st.warning(res.get('msg'))
+		else:
+			st.info("Variables insuffisantes.")
 
 with tests_tab[4]:
-	if len(cat_vars) >= 1 and len(quant_vars) >= 1:
-		group = st.selectbox("Groupe", cat_vars, key="an_group2")
-		val = st.selectbox("Quantitative", quant_vars, key="an_val2")
-		res = run_anova(df, group, val)
-		if res.get('ok'):
-			c1a,c2a,c3a = st.columns(3)
-			_metric_row((c1a,c2a,c3a), [("F", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("k", res['k'])])
-			st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
-			st.pyplot(make_boxplot(df, group, val))
-		else:
-			st.warning(res.get('msg'))
+	if not HAS_SCIPY:
+		st.info("ANOVA indisponible (SciPy manquant).")
 	else:
-		st.info("Variables insuffisantes.")
+		if len(cat_vars) >= 1 and len(quant_vars) >= 1:
+			group = st.selectbox("Groupe", cat_vars, key="an_group2")
+			val = st.selectbox("Quantitative", quant_vars, key="an_val2")
+			res = run_anova(df, group, val)
+			if res.get('ok'):
+				c1a,c2a,c3a = st.columns(3)
+				_metric_row((c1a,c2a,c3a), [("F", f"{res['stat']:.3f}"),("p-value", f"{res['pvalue']:.3g}"),("k", res['k'])])
+				st.markdown(_format_significance(res['pvalue'], alpha), unsafe_allow_html=True)
+				st.pyplot(make_boxplot(df, group, val))
+			else:
+				st.warning(res.get('msg'))
+		else:
+			st.info("Variables insuffisantes.")
 
 
 # ---------------------------------------------------------------------------
